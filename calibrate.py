@@ -6,7 +6,7 @@ from pybricks.parameters import Port
 from pybricks.tools import wait
 
 ev3 = EV3Brick()
-color_sensor = ColorSensor(Port.S4)
+color_sensor = ColorSensor(Port.S1)
 
 print("--- COLOR SENSOR CALIBRATION ---")
 
