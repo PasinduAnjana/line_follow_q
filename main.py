@@ -6,6 +6,10 @@ from pybricks.parameters import Port, Stop
 from pybricks.tools import wait
 import random
 import json
+try:
+    import uos as os
+except ImportError:
+    import os
 
 # =====================================================================
 # 🔌 1. HARDWARE INITIALIZATION
@@ -25,7 +29,7 @@ TRAINING_MODE = False
 
 ALPHA = 0.25          # Learning rate
 GAMMA = 0.85          # Discount factor for future rewards
-EPSILON = 0.40 if TRAINING_MODE else 0.0  # 0.0 for pure exploitation (Demo mode)
+EPSILON = 0.35 if TRAINING_MODE else 0.0  # Controlled exploration rate
 MIN_EPSILON = 0.02    # Minimum exploration
 DECAY_RATE = 0.997    # Slow decay for thorough learning
 
@@ -41,22 +45,25 @@ LOST_OFFLINE = 3   # Deep in black / completely lost (reflection < 7) -> Learns 
 NUM_STATES   = 4
 NUM_ACTIONS  = 4
 
-# Loop Direction Setting: "CLOCKWISE" or "ANTICLOCKWISE"
-# On the big loop:
-# - CLOCKWISE: Inner edge has black on the RIGHT, white tape on the LEFT.
-# - ANTICLOCKWISE: Inner edge has black on the LEFT, white tape on the RIGHT.
-DIRECTION = "CLOCKWISE"
+# Obstacle Detection Distance (cm)
+OBSTACLE_THRESHOLD_CM = 10
 
-Q_TABLE_FILE = "q_table_v7.json"
+Q_TABLE_FILE = "q_table_v10.json"
 
 # =====================================================================
-# 💾 3. SAVE & LOAD Q-TABLE
+# 💾 3. ATOMIC SAFE SAVE & LOAD Q-TABLE
 # =====================================================================
 def save_q_table(q_table, filename=Q_TABLE_FILE):
+    """
+    Atomic save: Writes to a .tmp file first, then renames.
+    Prevents file corruption even if interrupted mid-save.
+    """
+    temp_file = filename + ".tmp"
     try:
-        with open(filename, "w") as f:
+        with open(temp_file, "w") as f:
             json.dump(q_table, f)
-        print("💾 Q-Table saved successfully!")
+        os.rename(temp_file, filename)
+        print("💾 Q-Table safely saved!")
     except Exception as e:
         print("Failed to save Q-table:", e)
 
@@ -68,8 +75,8 @@ def load_q_table(filename=Q_TABLE_FILE):
             if len(data) == NUM_STATES and len(data[0]) == NUM_ACTIONS:
                 print("📂 Loaded saved Q-Table from", filename)
                 return data
-    except OSError:
-        pass
+    except Exception as e:
+        print("⚠️ Q-Table file not ready or corrupt ({}). Starting fresh.".format(e))
 
     print("🆕 Starting with fresh Q-table!")
     return [[0.0 for _ in range(NUM_ACTIONS)] for _ in range(NUM_STATES)]
@@ -114,12 +121,12 @@ def select_action(state):
 
 def execute_action(action):
     """
-    Stronger pivot turns to easily wrap around 90-degree rectangular corners.
+    Motor control optimized for sharp 90-degree corners and smooth straights.
     """
-    speed_fwd  = 110
-    turn_outer = 150
-    turn_inner = -70    # Strong counter-rotation to turn 90-deg corners fast
-    rev_speed  = 90
+    speed_fwd  = 100
+    turn_outer = 160
+    turn_inner = -90    # Fast counter-rotation for sharp 90-deg corner transitions
+    rev_speed  = 85
 
     if action == FORWARD:
         left_motor.run(speed_fwd)
@@ -134,67 +141,68 @@ def execute_action(action):
         left_motor.run(turn_outer)
         right_motor.run(turn_inner)
 
-    wait(100)  # 100ms duration ensures adequate degrees per turn step
+    wait(85)  # Responsive 85ms sampling for instant corner detection
 
 # =====================================================================
-# 🏆 6. REWARD FUNCTION (DIRECTION-AWARE INNER EDGE TRACKING)
+# 🏆 6. PURE STATE-TRANSITION REWARD FUNCTION (NO REWARD HACKING)
 # =====================================================================
 def get_reward(prev_state, action, new_state):
     """
-    Enforces inner-edge tracking so the robot NEVER crosses onto the
-    outer loop or gets stuck in reverse oscillations.
+    Pure transition-based reward R(s, a, s'):
+    - Strongly rewards FORWARD on the edge.
+    - Heavily penalizes FORWARD in TOO_WHITE/TOO_BLACK (prevents overshooting corners).
+    - Only rewards corrective TURNS when drifting (TOO_WHITE / TOO_BLACK).
+    - REVERSE is only a fallback recovery when completely lost off track.
     """
-    # Define correct turn directions based on track orientation
-    if DIRECTION == "CLOCKWISE":
-        turn_towards_tape = LEFT   # Tape is to the left
-        turn_towards_edge = RIGHT  # Center/edge is to the right
-    else: # ANTICLOCKWISE
-        turn_towards_tape = RIGHT  # Tape is to the right
-        turn_towards_edge = LEFT   # Center/edge is to the left
-
-    # 1. On edge -> Moving forward is ideal
+    # 1. On Edge -> Forward is top priority
     if prev_state == ON_EDGE:
         if action == FORWARD:
-            return 12.0
+            return 15.0 if new_state == ON_EDGE else 2.0
+        elif action == REVERSE:
+            return -12.0 # Heavily penalize backing up when already on track
+        else:
+            return -3.0  # Mild penalty for turning when already centered
+
+    # 2. Too far on white tape (Corner entry) -> MUST TURN (Never forward or reverse)
+    elif prev_state == TOO_WHITE:
+        if action in (LEFT, RIGHT) and new_state == ON_EDGE:
+            return 15.0  # Turning to find edge at the corner gets top reward!
+        elif action == FORWARD:
+            return -10.0 # HEAVILY penalize driving forward through the tape at corners!
         elif action == REVERSE:
             return -8.0
         else:
-            return -2.0  # Mild penalty for turning when already on edge
-
-    # 2. Too far on white tape -> MUST turn towards inner edge (NOT across to outer loop!)
-    elif prev_state == TOO_WHITE:
-        if action == turn_towards_edge:
-            return 15.0 if new_state == ON_EDGE else 6.0
-        elif action == turn_towards_tape:
-            return -12.0 # HEAVILY penalize crossing over the tape to outer edge!
-        elif action == FORWARD:
-            return 1.0
-        else:
-            return -6.0
-
-    # 3. Drifting into black center -> MUST turn towards white tape
-    elif prev_state == TOO_BLACK:
-        if action == turn_towards_tape:
-            return 15.0 if new_state in (ON_EDGE, TOO_WHITE) else 6.0
-        elif action == turn_towards_edge:
-            return -12.0 # HEAVILY penalize steering further into black!
-        elif action == FORWARD:
-            return -4.0
-        else:
             return -5.0
 
-    # 4. Completely lost off track (< 6 reflection)
-    elif prev_state == LOST_OFFLINE:
-        if action == turn_towards_tape and new_state in (ON_EDGE, TOO_WHITE, TOO_BLACK):
-            return 16.0
-        elif action == REVERSE:
-            if new_state in (ON_EDGE, TOO_WHITE, TOO_BLACK):
-                return 8.0
-            return 3.0
+    # 3. Drifting into black background -> MUST TURN back to tape
+    elif prev_state == TOO_BLACK:
+        if action in (LEFT, RIGHT) and new_state in (ON_EDGE, TOO_WHITE):
+            return 15.0  # Turning to recover tape/edge gets top reward!
         elif action == FORWARD:
-            return -15.0
+            return -10.0 # HEAVILY penalize driving forward further into black!
+        elif action == REVERSE:
+            return -8.0
         else:
             return -6.0
+
+    # 4. Completely lost off track (< 7 reflection)
+    elif prev_state == LOST_OFFLINE:
+        if new_state in (ON_EDGE, TOO_WHITE, TOO_BLACK):
+            # Recovery achieved: Turning is preferred over reversing
+            if action in (LEFT, RIGHT):
+                return 16.0  # Turning around corner gets highest reward
+            elif action == REVERSE:
+                return 6.0   # Reversing recovery gets modest reward
+            else:
+                return 2.0
+        else:
+            # Still lost
+            if action == REVERSE:
+                return -2.0  # Negative (no free points for staying lost)
+            elif action == FORWARD:
+                return -15.0 # Heavy penalty for driving deeper into black
+            else:
+                return -6.0
 
     return -5.0
 
@@ -203,50 +211,37 @@ def get_reward(prev_state, action, new_state):
 # =====================================================================
 def avoid_obstacle():
     """
-    Non-RL bypass maneuver when an obstacle is detected:
+    Non-RL bypass maneuver scaled for a wide (~20cm) EV3 robot:
     1. Stop and alert (beep)
-    2. Turn into the open inner center area (away from track and obstacle)
-    3. Drive forward along the bypass flank past the obstacle
-    4. Turn back to face the track
+    2. Full ~90° synchronized pivot into the open center arena
+    3. Drive forward along the flank to completely clear the obstacle
+    4. Full ~90° synchronized pivot back to face the track
     """
-    print("🚧 Obstacle detected! Starting bypass maneuver...")
+    print("🚧 Obstacle detected! Starting wide bypass maneuver...")
     ev3.speaker.beep(frequency=700, duration=150)
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(200)
+    wait(150)
 
-    # In CLOCKWISE, open center is to the RIGHT -> Turn Right first
-    # In ANTICLOCKWISE, open center is to the LEFT -> Turn Left first
-    if DIRECTION == "CLOCKWISE":
-        # Turn Right ~75 deg
-        left_motor.run_angle(180, 160)
-        right_motor.run_angle(180, -160)
-        wait(200)
+    bypass_speed = 180
+    pivot_angle  = 360   # Scaled for 20cm wheelbase: gives a true ~90 deg body turn
+    flank_dist   = 600  # ~30cm travel to safely clear full robot body + obstacle
+    aim_angle    = 340   # Re-aim turn angle back towards track
 
-        # Drive forward past obstacle
-        left_motor.run_angle(180, 260, wait=False)
-        right_motor.run_angle(180, 260, wait=True)
-        wait(200)
+    # 1. Pivot Left ~90 deg into open center (for Counter-Clockwise inner edge)
+    left_motor.run_angle(bypass_speed, -pivot_angle, wait=False)
+    right_motor.run_angle(bypass_speed, pivot_angle, wait=True)
+    wait(150)
 
-        # Turn Left ~75 deg to aim back toward the line
-        left_motor.run_angle(180, -170)
-        right_motor.run_angle(180, 170)
-        wait(200)
-    else: # ANTICLOCKWISE
-        # Turn Left ~75 deg
-        left_motor.run_angle(180, -160)
-        right_motor.run_angle(180, 160)
-        wait(200)
+    # 2. Drive forward past the obstacle
+    left_motor.run_angle(bypass_speed, flank_dist, wait=False)
+    right_motor.run_angle(bypass_speed, flank_dist, wait=True)
+    wait(150)
 
-        # Drive forward past obstacle
-        left_motor.run_angle(180, 260, wait=False)
-        right_motor.run_angle(180, 260, wait=True)
-        wait(200)
-
-        # Turn Right ~75 deg to aim back toward the line
-        left_motor.run_angle(180, 170)
-        right_motor.run_angle(180, -170)
-        wait(200)
+    # 3. Pivot Right ~90 deg to face the line
+    left_motor.run_angle(bypass_speed, aim_angle, wait=False)
+    right_motor.run_angle(bypass_speed, -aim_angle, wait=True)
+    wait(150)
 
 def find_path():
     """
@@ -254,16 +249,17 @@ def find_path():
     Drives forward/sweeps until the line's reflection threshold is detected.
     """
     print("🔍 Searching for line path...")
-    # Drive forward diagonally towards the line
-    left_motor.run(110)
-    right_motor.run(110)
+    # Drive forward towards the line (speed 140 deg/s ~6.8 cm/s)
+    left_motor.run(140)
+    right_motor.run(140)
 
     timeout = 0
-    while color_sensor.reflection() < 16 and timeout < 40:
+    # Timeout 180 * 50ms = 9.0 seconds (~60cm max travel distance)
+    while color_sensor.reflection() < 16 and timeout < 180:
         wait(50)
         timeout += 1
 
-    # If not found directly, sweep in an arc to find the line
+    # If not found directly, sweep in an arc to locate the line
     if color_sensor.reflection() < 16:
         left_motor.run(-80)
         right_motor.run(80)
@@ -282,11 +278,11 @@ def find_path():
 step_count = 0
 status_str = "Running Demo" if not TRAINING_MODE else "Training"
 ev3.speaker.say(status_str)
-print("🚀 Mode:", status_str, "| Direction:", DIRECTION)
+print("🚀 Mode:", status_str)
 
 while True:
-    # 1. Non-RL Obstacle detection check (IR distance < 15cm)
-    if ir_sensor.distance() < 15:
+    # 1. Non-RL Obstacle detection check
+    if ir_sensor.distance() < OBSTACLE_THRESHOLD_CM:
         avoid_obstacle()
         find_path()
         continue
