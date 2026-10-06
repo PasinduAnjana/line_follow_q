@@ -15,8 +15,8 @@ except ImportError:
 # 🔌 1. HARDWARE INITIALIZATION
 # =====================================================================
 ev3 = EV3Brick()
-left_motor = Motor(Port.B)
-right_motor = Motor(Port.D)
+left_motor = Motor(Port.C)
+right_motor = Motor(Port.B)
 color_sensor = ColorSensor(Port.S1)
 ir_sensor = InfraredSensor(Port.S4)
 
