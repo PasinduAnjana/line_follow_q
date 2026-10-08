@@ -37,11 +37,17 @@ DECAY_RATE = 0.997    # Slow decay for thorough learning
 FORWARD, REVERSE, LEFT, RIGHT = 0, 1, 2, 3
 ACTION_NAMES = ["FWD", "REV", "LEFT", "RIGHT"]
 
-# States based on calibrated reflection (White: ~30, Edge: ~20, Black: ~4)
-ON_EDGE      = 0   # Perfect tracking on boundary (reflection 15 to 24) -> Learns FORWARD
+# Calibrated Reflection Thresholds (White: ~67, Edge: ~15, Black: ~5)
+THRESH_WHITE = 35  # Deep on white tape (reflection >= 25)
+THRESH_EDGE  = 15  # Edge tracking boundary (reflection 12 to 24, centered around ~15)
+THRESH_BLACK = 5   # Drifting into black background (reflection 8 to 11)
+                   # Deep black / completely lost: reflection < 8 (around ~5)
+
+# States based on calibrated reflection (White: ~67, Edge: ~15, Black: ~5)
+ON_EDGE      = 0   # Perfect tracking on boundary (reflection 12 to 24) -> Learns FORWARD
 TOO_WHITE    = 1   # Deep on white tape (reflection >= 25) -> Learns turn towards edge
-TOO_BLACK    = 2   # Drifting into black background (reflection 7 to 14) -> Learns turn towards edge
-LOST_OFFLINE = 3   # Deep in black / completely lost (reflection < 7) -> Learns REVERSE / Turn!
+TOO_BLACK    = 2   # Drifting into black background (reflection 8 to 11) -> Learns turn towards edge
+LOST_OFFLINE = 3   # Deep in black / completely lost (reflection < 8) -> Learns REVERSE / Turn!
 NUM_STATES   = 4
 NUM_ACTIONS  = 4
 
@@ -89,17 +95,17 @@ q_table = load_q_table()
 def get_state():
     """
     Calibrated based on:
-    - White path: ~30 (>= 25)
-    - Edge boundary: ~20 (15..24)
-    - Drifting black: ~10 (7..14)
-    - Deep black (Lost): ~4 (< 7)
+    - White path: ~67 (>= 25)
+    - Edge boundary: ~15 (12..24)
+    - Drifting black: ~10 (8..11)
+    - Deep black (Lost): ~5 (< 8)
     """
     reflection = color_sensor.reflection()
-    if reflection >= 25:
+    if reflection >= THRESH_WHITE:
         return TOO_WHITE
-    elif reflection >= 15:
+    elif reflection >= THRESH_EDGE:
         return ON_EDGE
-    elif reflection >= 7:
+    elif reflection >= THRESH_BLACK:
         return TOO_BLACK
     else:
         return LOST_OFFLINE
@@ -185,7 +191,7 @@ def get_reward(prev_state, action, new_state):
         else:
             return -6.0
 
-    # 4. Completely lost off track (< 7 reflection)
+    # 4. Completely lost off track (< 8 reflection)
     elif prev_state == LOST_OFFLINE:
         if new_state in (ON_EDGE, TOO_WHITE, TOO_BLACK):
             # Recovery achieved: Turning is preferred over reversing
@@ -255,15 +261,15 @@ def find_path():
 
     timeout = 0
     # Timeout 180 * 50ms = 9.0 seconds (~60cm max travel distance)
-    while color_sensor.reflection() < 16 and timeout < 180:
+    while color_sensor.reflection() < THRESH_EDGE and timeout < 180:
         wait(50)
         timeout += 1
 
     # If not found directly, sweep in an arc to locate the line
-    if color_sensor.reflection() < 16:
+    if color_sensor.reflection() < THRESH_EDGE:
         left_motor.run(-80)
         right_motor.run(80)
-        while color_sensor.reflection() < 16:
+        while color_sensor.reflection() < THRESH_EDGE:
             wait(50)
 
     left_motor.stop(Stop.BRAKE)

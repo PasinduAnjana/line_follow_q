@@ -21,9 +21,9 @@ while True:
     # Classify reflection according to main.py calibrated thresholds
     if reflection >= 25:
         surface = "WHITE TAPE"
-    elif reflection >= 15:
+    elif reflection >= 12:
         surface = "ON EDGE"
-    elif reflection >= 7:
+    elif reflection >= 8:
         surface = "DRIFT BLACK"
     else:
         surface = "LOST / BLACK"
